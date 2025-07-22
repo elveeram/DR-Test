@@ -114,11 +114,68 @@ func deleteResource(resourceToDelete, kind, filePath string) {
 	}
 }
 
+// cleanupAWSResources performs a series of AWS cleanup operations.
+// It takes the IAM role name, S3 bucket name, and KMS key ARN as input.
+func cleanupAWSResources(roleName, bucketName, clusterId, mcName string) error {
+
+	// --- IAM Operations ---
+
+	// List all policies in the role
+	rolePolicyListCmd := "aws iam list-attached-role-policies --role-name rosa-hcp-bkp-" + mcName + "-" + clusterId + " | awk '{print $2}'"
+
+	rolePolicyListOutput, err := runCommand("bash", "-c", rolePolicyListCmd)
+	if err != nil {
+		return fmt.Errorf("Policies are empty or role does not exist: %s", err)
+	}
+	fmt.Printf("Role policies list is as follows...\n")
+
+	var detachIAMRolePolicyCmd, deleteRoleCmd string
+	for _, item := range rolePolicyListOutput {
+		// 1. Detach IAM Role Policy
+		detachIAMRolePolicyCmd = "aws iam detach-role-policy --policy-arn " + item + " --role-name rosa-hcp-bkp-" + mcName + "-" + clusterId
+
+		detachIAMRolePolicyOutput, err := runCommand("bash", "-c", detachIAMRolePolicyCmd)
+		if err != nil {
+			return fmt.Errorf("Policies are empty or role does not exist: %s", err)
+		}
+		fmt.Printf("Role policy %s is detached successfully.\n", detachIAMRolePolicyOutput)
+	}
+
+	// 2. Delete IAM Role
+	deleteRoleCmd = "aws iam delete-role --role-name " + roleName
+	deleteRoleCmdOutput, err := runCommand("bash", "-c", deleteRoleCmd)
+	if err != nil {
+		return fmt.Errorf("failed to delete IAM role '%s': %w", roleName, err)
+	}
+	fmt.Printf("Successfully deleted IAM role '%s'.\n", deleteRoleCmdOutput)
+
+	// 3. Delete S3 Bucket (and its contents first)
+	fmt.Printf("Attempting to delete S3 bucket '%s'...\n", bucketName)
+	s3Cmd := "aws s3 rb s3://" + bucketName + " --force"
+	// Execute the s3 command
+	s3CmdOutput, err := runCommand("bash", "-c", s3Cmd)
+	if err != nil {
+		return fmt.Errorf("failed to execute yq command: %s", err)
+	}
+	// List and delete all objects in the bucket first
+	fmt.Printf("Deleting all objects in bucket '%s'...\n", s3CmdOutput)
+
+	fmt.Printf("Successfully deleted S3 bucket '%s'.\n", bucketName)
+
+	return nil
+}
+
 func main() {
+	// os.Args[1] -> Path to backup_resources.yml file
+	// os.Args[2] -> role name
+	// os.Args[3] -> bucket name
+	// os.Args[4] -> clusterId
+	// os.Args[5] -> mc name
 
 	fmt.Println("------Delete resources-------")
 	deleteResource("bsl", "BackupStorageLocation", os.Args[1])
 	deleteResource("schedule", "Schedule", os.Args[1])
 	deleteResource("backup", "BackupStorageLocation", os.Args[1])
 	deleteResource("secret", "Secret", os.Args[1])
+	cleanupAWSResources(os.Args[2], os.Args[3], os.Args[4], os.Args[5])
 }
