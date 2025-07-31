@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,15 @@ import (
 	"strings"
 	"unicode"
 )
+
+// BackupConfig holds all the variables needed to populate the backup template.
+type BackupConfig struct {
+	SecretData  string
+	ClusterID   string
+	ClusterName string
+	ClusterEnv  string
+	BucketName  string
+}
 
 // runCommand executes a shell command and returns its stdout and stderr.
 // It also prints the command being executed for clarity.
@@ -141,14 +151,14 @@ func setupCluster(clusterID, clusterName, clusterEnv string) error {
 
 // createS3Bucket performs the steps to create an AWS S3 bucket.
 // It sets the AWS_PROFILE and generates a unique bucket name.
-func createS3Bucket(awsProfile, region string) error {
+func createS3Bucket(awsProfile, region string) (string, error) {
 	fmt.Println("\n--- AWS S3 Bucket Creation Started ---")
 
 	// Step 1: Generate a unique bucket name using uuidgen
 	fmt.Println("Step 1: Generating unique bucket name...")
 	uuidStdout, uuidStderr, err := runCommand("uuidgen")
 	if err != nil {
-		return fmt.Errorf("failed to generate UUID: %w, stderr: %s", err, uuidStderr)
+		return "", fmt.Errorf("failed to generate UUID: %w, stderr: %s", err, uuidStderr)
 	}
 	// Clean up the UUID: remove hyphens and convert to lowercase
 	generatedUUID := strings.TrimSpace(uuidStdout)
@@ -170,13 +180,13 @@ func createS3Bucket(awsProfile, region string) error {
 		"--create-bucket-configuration", fmt.Sprintf("LocationConstraint=%s", region))
 
 	if err != nil {
-		return fmt.Errorf("failed to create S3 bucket: %w, stderr: %s", err, s3Stderr)
+		return "", fmt.Errorf("failed to create S3 bucket: %w, stderr: %s", err, s3Stderr)
 	}
 	fmt.Println("S3 Bucket Creation Output:\n", s3Stdout)
 	fmt.Printf("S3 bucket '%s' created successfully.\n", bucketName)
 
 	fmt.Println("--- AWS S3 Bucket Creation Completed ---")
-	return nil
+	return bucketName, nil
 }
 
 // createOIDCConfig retrieves the OIDC endpoint URL and extracts the OIDC ID.
@@ -452,6 +462,164 @@ func createKMSKeyAndPolicy(awsProfile, clusterID, clusterEnv, awsRegion, roleArn
 	return kmsArn, kmsIAMPolicyName, nil
 }
 
+func GenerateAWSRoleSecret(roleArn, filename string) (string, error) {
+	// Define the content template for the aws_role.txt file.
+	// Using a placeholder like "${ROLE_ARN}" is a common practice for substitution.
+	fileContentTemplate := fmt.Sprintf(`[default]
+role_arn = %s
+web_identity_token_file = /var/run/secrets/openshift/serviceaccount/token
+region=us-west-2
+`, roleArn)
+
+	// Substitute the placeholder with the actual role ARN.
+	substitutedContent := strings.Replace(fileContentTemplate, "${ROLE_ARN}", roleArn, 1)
+
+	// Base64 encode the substituted content.
+	encodedData := base64.StdEncoding.EncodeToString([]byte(substitutedContent))
+
+	// secretStdOut, secretStderr, secretErr := runCommand("envsubst", "<", "aws_role.txt", "|", "base64", "-w", "0")
+	// if secretErr != nil {
+	// 	fmt.Errorf("failed to extract secret Data ID: %w, stderr: %s", secretErr, secretStderr)
+	// }
+	// fmt.Printf("secret data standard output: %s\n", secretStdOut)
+
+	err := os.Setenv("secret_data", encodedData)
+	if err != nil {
+		fmt.Printf("Secret data error: %s\n", err)
+	}
+	secretData := os.Getenv("secret_data")
+	fmt.Printf("Secret Data is %s\n", secretData)
+	return secretData, nil
+}
+
+// GenerateBackupResources takes a BackupConfig and populates the backup YAML template.
+// This function mimics the behavior of:
+// envsubst < backup_template.yaml > backup_resources.yaml
+func CreateBackupResources(config BackupConfig) (string, error) {
+	// The content of backup_template.yaml is defined here as a multi-line string.
+	// Note: In Go, we use placeholders like ${VAR} for clarity, which we'll replace.
+	// The shell's $VAR syntax is handled by the replacer.
+	template := `apiVersion: v1
+data:
+credentials: ${SECRET_DATA}
+kind: Secret
+metadata:
+  name: ${CLUSTER_ID}-backup-role
+  namespace: openshift-adp
+type: Opaque
+---
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: ${CLUSTER_ID}-hourly
+  namespace: openshift-adp
+spec:
+  provider: aws
+  objectStorage:
+    bucket: ${BUCKET_NAME}
+    prefix: backup-objects
+  credential:
+    name: ${CLUSTER_ID}-backup-role
+    key: credentials
+  config:
+    region: us-west-2
+    profile: default
+    tagging: "ocm_environment=${CLUSTER_ENV}&schedule=hourly"
+---
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: ${CLUSTER_ID}-hourly
+  namespace: openshift-adp
+  labels:
+    velero.io/storage-location: ${CLUSTER_ID}-hourly
+spec:
+  schedule: "30 * * * *"
+  template:
+    includedNamespaces:
+    - ocm-${CLUSTER_ENV}-${CLUSTER_ID}-${CLUSTER_NAME}
+    - ocm-${CLUSTER_ENV}-${CLUSTER_ID}
+    includedResources:
+    - sa
+    - role
+    - rolebinding
+    - pod
+    - pvc
+    - pv
+    - configmap
+    - priorityclasses
+    - pdb
+    - hostedcluster
+    - nodepool
+    - secrets
+    - services
+    - deployments
+    - statefulsets
+    - hostedcontrolplane
+    - cluster
+    - awscluster
+    - awsmachinetemplate
+    - awsmachine
+    - machinedeployment
+    - machineset
+    - machine
+    - route
+    - clusterdeployment
+    - namespace
+    excludedResources: []
+    storageLocation: ${CLUSTER_ID}-hourly
+    ttl: 24h0m0s
+    snapshotMoveData: true
+    datamover: "velero"
+    defaultVolumesToFsBackup: false
+    snapshotVolumes: true
+`
+	// Use strings.NewReplacer for an efficient and clean way to substitute
+	// all variables in one pass.
+	replacer := strings.NewReplacer(
+		"${SECRET_DATA}", config.SecretData,
+		"${CLUSTER_ID}", config.ClusterID,
+		"${BUCKET_NAME}", config.BucketName,
+		"${CLUSTER_ENV}", config.ClusterEnv,
+		"${CLUSTER_NAME}", config.ClusterName,
+	)
+
+	// Perform the substitution.
+	finalYAML := replacer.Replace(template)
+
+	os.WriteFile("backup_resources.yaml", []byte(finalYAML), 0644)
+	// backupStdOut, backupStderr, backupErr := runCommand("envsubst", "<", "backup_template.yaml", ">", "backup_resources.yaml")
+	// if backupErr != nil {
+	// 	fmt.Errorf("failed to extract secret Data ID: %w, stderr: %s", backupStdOut, backupStderr)
+	// }
+	fmt.Printf("\nSuccessfully generated and saved backup_resources.yaml\n")
+
+	projectChangeStdout, projectChangeStderr, err := runCommand("oc", "project", "openshift-adp")
+	if err != nil {
+		return "", fmt.Errorf("failed to list attached role policies: %w, stderr: %s", err, projectChangeStderr)
+	}
+	fmt.Println("List Policies Output:\n", projectChangeStdout)
+
+	applyBackupStdout, applyBackuperr, err := runCommand("oc", "apply", "-f", "backup_resources.yaml")
+	if err != nil {
+		return "", fmt.Errorf("Failed to read backup_resources file: %w, stderr: %s", err, applyBackuperr)
+	}
+	fmt.Println("List Policies Output:\n", applyBackupStdout)
+
+	return finalYAML, nil
+}
+
+func validateBackupCreated(clusterId string) {
+	validateScheduleStdout, validateScheduleerr, err := runCommand("oc", "get", "schedule")
+	if err != nil {
+		fmt.Errorf("schedule not found: %w, stderr: %s", err, validateScheduleerr)
+	}
+	if strings.Contains(validateScheduleStdout, clusterId) {
+		fmt.Println("Cluster Schedule is present:")
+	}
+
+}
+
 func main() {
 	// --- IMPORTANT: Replace these placeholder values with your actual cluster details ---
 	// You can get these from your ROSA cluster creation process.
@@ -462,14 +630,14 @@ func main() {
 	awsProfile := os.Args[5]  // e.g., "dr-account" Your local aws config should have this name.
 	awsRegion := os.Args[6]   // e.g., us-west-2 can be whichever region you are looking for.
 	// ----------------------------------------------------------------------------------
-
+	var bucketName string
 	// Call the setupCluster function with your cluster details
 	err := setupCluster(clusterID, clusterName, clusterEnv)
 	if err != nil {
 		log.Fatalf("Cluster setup failed: %v", err)
 	}
 	// Call the createS3Bucket function with your AWS details
-	err = createS3Bucket(awsProfile, awsRegion)
+	bucketName, err = createS3Bucket(awsProfile, awsRegion)
 	if err != nil {
 		log.Printf("AWS S3 bucket creation failed: %v", err)
 		// Do not exit fatally here, allow other independent operations to proceed.
@@ -495,4 +663,30 @@ func main() {
 		log.Fatalf("KMS key and policy creation failed: %v", err)
 	}
 	fmt.Printf("\nFinal KMS ARN: %s\nFinal KMS IAM Policy Name: %s\n", kmsArn, kmsIAMPolicyName)
+
+	secretData, err := GenerateAWSRoleSecret(roleArn, "aws_role.txt")
+	if err != nil {
+		fmt.Printf("Error generating secret data: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Secret data is as follows:%s", secretData)
+
+	// --- Step 2: Define the configuration for the backup resources ---
+	// In a real application, these values would come from environment variables,
+	// command-line flags, or a configuration file.
+	config := BackupConfig{
+		SecretData:  secretData,
+		ClusterID:   clusterID,
+		ClusterName: clusterName,
+		ClusterEnv:  clusterEnv,
+		BucketName:  bucketName,
+	}
+
+	// --- Step 3: Generate the final backup_resources.yaml content ---
+	backupYAML, err := CreateBackupResources(config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating backup resources: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Secret data is as follows:%s", backupYAML)
 }
