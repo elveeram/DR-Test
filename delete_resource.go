@@ -187,7 +187,7 @@ func cleanupAWSResources(clusterId, mcName string) error {
 	// Execute the s3 command
 	s3CmdOutput, err := runCommand(awsCmd, s3CmdListArgs...)
 	if err != nil {
-		fmt.Printf("failed to execute yq command: %s", err)
+		fmt.Printf("failed to execute S3 bucket deletion: %s", err)
 	}
 	//List and delete all objects in the bucket first
 	fmt.Printf("Deleting all objects in bucket '%s'...\n", s3CmdOutput)
