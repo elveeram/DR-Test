@@ -155,8 +155,8 @@ func cleanupAWSResources(clusterId, mcName string) error {
 	// List all policies in the role
 	awsCmd := "aws"
 	rolePolicyListArgs := []string{"iam", "list-attached-role-policies", "--role-name", roleNamePrefix + mcName + "-" + clusterId, "|", "awk", "{print $2}"}
-
-	rolePolicyListOutput, err := runCommand(awsCmd, rolePolicyListArgs...)
+	rolePolicycmd := exec.Command(awsCmd, rolePolicyListArgs...)
+	rolePolicyListOutput, err := rolePolicycmd.Output()
 	if err != nil {
 		fmt.Printf("Policies are empty or role does not exist: %s", err)
 	}
@@ -164,9 +164,9 @@ func cleanupAWSResources(clusterId, mcName string) error {
 
 	for _, item := range rolePolicyListOutput {
 		// 1. Detach IAM Role Policy
-		var detachIAMRolePolicyListArgs = []string{"iam", "detach-role-policy", "--policy-arn", item, "--role-name", "rosa-hcp-bkp-" + mcName + "-" + clusterId}
-
-		detachIAMRolePolicyOutput, err := runCommand(awsCmd, detachIAMRolePolicyListArgs...)
+		var detachIAMRolePolicyListArgs = []string{"iam", "detach-role-policy", "--policy-arn", string(item), "--role-name", "rosa-hcp-bkp-" + mcName + "-" + clusterId}
+		detachPolicycmd := exec.Command(awsCmd, detachIAMRolePolicyListArgs...)
+		detachIAMRolePolicyOutput, err := detachPolicycmd.Output()
 		if err != nil {
 			fmt.Printf("Policies are empty or role does not exist: %s", err)
 		}
@@ -175,17 +175,19 @@ func cleanupAWSResources(clusterId, mcName string) error {
 
 	// 2. Delete IAM Role
 	var deleteRoleListArgs = []string{"iam", "delete-role", "--role-name", roleNamePrefix + mcName + "-" + clusterId}
-	deleteRoleCmdOutput, err := runCommand(awsCmd, deleteRoleListArgs...)
+	deleteRoleCmd := exec.Command(awsCmd, deleteRoleListArgs...)
+	deleteRoleOutput, err := deleteRoleCmd.Output()
 	if err != nil {
 		fmt.Printf("failed to delete IAM role '%s': %w", roleNamePrefix+mcName+"-"+clusterId, err)
 	}
-	fmt.Printf("Successfully deleted IAM role '%s'.\n", deleteRoleCmdOutput)
+	fmt.Printf("Successfully deleted IAM role '%s'.\n", deleteRoleOutput)
 
 	// 3. Delete S3 Bucket (and its contents first)
 	fmt.Printf("Attempting to delete S3 bucket '%s'...\n", bucketName)
 	s3CmdListArgs := []string{"s3", "rb", "s3://" + bucketName, " --force"}
 	// Execute the s3 command
-	s3CmdOutput, err := runCommand(awsCmd, s3CmdListArgs...)
+	S3Cmd := exec.Command(awsCmd, s3CmdListArgs...)
+	s3CmdOutput, err := S3Cmd.Output()
 	if err != nil {
 		fmt.Printf("failed to execute S3 bucket deletion: %s", err)
 	}
@@ -198,21 +200,19 @@ func cleanupAWSResources(clusterId, mcName string) error {
 }
 
 func main() {
-	// os.Args[1] -> Path to backup_resources.yml file
-	// os.Args[2] -> role name
-	// os.Args[3] -> bucket name
-	// os.Args[4] -> clusterId
-	// os.Args[5] -> mc name
+	// os.Args[1] -> clusterId
+	// os.Args[2] -> mc name
+
 	var clusterId = os.Args[1]
 	var mcName = os.Args[2]
 
 	fmt.Println("------Delete Openshift resources-------")
 	cleanupAWSResources(clusterId, mcName)
 
-	fmt.Println("------Delete Openshift resources-------")
-	deleteResource("bsl", clusterId)
-	deleteResource("schedule", clusterId)
-	deleteResource("backup", clusterId)
-	deleteResource("secret", clusterId)
-	deleteResource("backuprepository", clusterId)
+	// fmt.Println("------Delete Openshift resources-------")
+	// deleteResource("bsl", clusterId)
+	// deleteResource("schedule", clusterId)
+	// deleteResource("backup", clusterId)
+	// deleteResource("secret", clusterId)
+	// deleteResource("backuprepository", clusterId)
 }
