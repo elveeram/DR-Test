@@ -209,10 +209,10 @@ func main() {
 	fmt.Println("------Delete Openshift resources-------")
 	cleanupAWSResources(clusterId, mcName)
 
-	// fmt.Println("------Delete Openshift resources-------")
-	// deleteResource("bsl", clusterId)
-	// deleteResource("schedule", clusterId)
-	// deleteResource("backup", clusterId)
-	// deleteResource("secret", clusterId)
-	// deleteResource("backuprepository", clusterId)
+	fmt.Println("------Delete Openshift resources-------")
+	deleteResource("bsl", clusterId)
+	deleteResource("schedule", clusterId)
+	deleteResource("backup", clusterId)
+	deleteResource("secret", clusterId)
+	deleteResource("backuprepository", clusterId)
 }
